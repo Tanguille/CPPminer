@@ -1,5 +1,15 @@
 # CPPminer
 
+## Blackwell tensor integration branch
+
+This `blackwell-tensor` branch integrates [danifest751's CUDA tensor-core
+patch stack](https://github.com/1640675651/CPPminer/pull/33) on pinned upstream
+`5b68506`. On one RTX 5070 Ti, a three-minute pool trial measured **136.36 TH/s
+at 243.82 W average GPU draw**, with 107 accepted and zero rejected user shares.
+The upstream 1% developer fee is retained.
+
+See [Blackwell provenance, Windows build instructions and validation](docs/blackwell-windows.md).
+
 Cross-Platform Pearl (now multi-algo) miner written in C++ supporting a wide range of hardware. Tested with LuckyPool, Herominers, and Kryptex. 
 
 ## Algorithms and Backends
