@@ -636,10 +636,10 @@ endforeach()
 
 # Match CMAKE_BUILD_TYPE when set; default Release (multi-config / empty type).
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(_cp_cargo_args build)
+    set(_cp_cargo_args build --locked)
     set(_cp_cargo_profile debug)
 else()
-    set(_cp_cargo_args build --release)
+    set(_cp_cargo_args build --release --locked)
     set(_cp_cargo_profile release)
 endif()
 set(_cp_cargo_out ${CP_PROOF_FFI_DIR}/target/${_cp_cargo_profile})
