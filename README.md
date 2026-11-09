@@ -2,6 +2,16 @@
 
 **C**ross-**P**latform **P**earl **miner** written in C++. It started as a Pearl miner and is now multi-algo, mining **Pearl** and **Quantus**. It runs on almost any hardware: x86 and ARM CPUs, NVIDIA, AMD and Intel GPUs, Intel Core Ultra NPUs and Snapdragon DSPs. Tested on LuckyPool, HeroMiners and Kryptex.
 
+## Blackwell tensor integration branch
+
+This `blackwell-tensor-v1.1` branch integrates [danifest751's CUDA tensor-core
+patch stack](https://github.com/1640675651/CPPminer/pull/33) on upstream `v1.1`
+(`abc1601`). On one RTX 5070 Ti, a three-minute pool trial of the earlier `v1.0`-based
+integration measured **136.36 TH/s at 243.82 W average GPU draw**, with 107 accepted
+and zero rejected user shares. The upstream 1% developer fee is retained.
+
+See [Blackwell provenance, Windows build instructions and validation](docs/blackwell-windows.md).
+
 ## Supported hardware
 
 Pick the backend for your hardware with `--backend`:
