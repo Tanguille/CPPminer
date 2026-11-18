@@ -28,7 +28,8 @@ jobs:
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
-          git merge-base --is-ancestor "$SOURCE_SHA" origin/blackwell-tensor
+          # the image commit sits on top of blackwell-tensor, so the branch must be its ancestor
+          git merge-base --is-ancestor origin/blackwell-tensor "$SOURCE_SHA"
           # local-no-dev-fee is unpublished, so the ref normally does not exist here
           if git rev-parse --verify -q origin/local-no-dev-fee; then
             ! git merge-base --is-ancestor "$SOURCE_SHA" origin/local-no-dev-fee
