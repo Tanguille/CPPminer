@@ -1,11 +1,14 @@
 name: cluster-image
 
 on:
+  # a push to this dedicated branch builds; the workflow is not on the default branch, so dispatch is not registered until it merges
+  push:
+    branches: [ci/cluster-image]
   workflow_dispatch:
     inputs:
       source_sha:
         description: Full commit sha to build; must be on blackwell-tensor and not on local-no-dev-fee
-        required: true
+        required: false
 
 env:
   VERSION: "1.0"
@@ -19,12 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
           fetch-depth: 0
 
       - name: Guard source commit
         env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ]
@@ -46,14 +49,14 @@ jobs:
       - name: Short sha
         run: echo "SHORT=${SOURCE_SHA::7}" >> "$GITHUB_ENV"
         env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
 
       - id: build
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
           push: true
-          build-args: SOURCE_SHA=${{ inputs.source_sha }}
+          build-args: SOURCE_SHA=${{ inputs.source_sha || github.sha }}
           tags: ghcr.io/tanguille/cppminer:${{ env.VERSION }}-${{ env.SHORT }}
 
       - name: Digest
