@@ -1,7 +1,7 @@
 name: cluster-image
 
 # Builds the latest upstream release (1640675651/CPPminer) with the developer fee
-# disabled and pushes ghcr.io/tanguille/cppminer:<version>-<upstream shortsha>.
+# disabled and pushes ghcr.io/tanguille/cppminer:<version> (plain, so Renovate can order tags).
 # This branch holds only the overlay (Dockerfile + workflow); upstream is cloned
 # at build time, so there is nothing to merge or rebase when upstream moves.
 
@@ -45,7 +45,7 @@ jobs:
           {
             echo "UPSTREAM_TAG=$tag"
             echo "SOURCE_SHA=$sha"
-            echo "IMAGE_TAG=${tag#v}-${sha::7}"
+            echo "IMAGE_TAG=${tag#v}"
           } >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v4.4.1
