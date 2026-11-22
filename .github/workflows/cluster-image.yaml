@@ -1,7 +1,7 @@
 name: cluster-image
 
-# Builds the latest upstream release (1640675651/CPPminer) with the developer fee
-# disabled and pushes ghcr.io/tanguille/cppminer:<version> (plain, so Renovate can order tags).
+# Builds the latest upstream `cuda` branch (1640675651/CPPminer) with the developer fee
+# disabled and pushes ghcr.io/tanguille/cppminer:<commit date> (plain, so Renovate can order tags).
 # This branch holds only the overlay (Dockerfile + workflow); upstream is cloned
 # at build time, so there is nothing to merge or rebase when upstream moves.
 
@@ -10,8 +10,8 @@ on:
     - cron: "17 5 * * *"
   workflow_dispatch:
     inputs:
-      tag:
-        description: Upstream tag to build (default is the newest vX.Y[.Z])
+      ref:
+        description: Upstream branch or tag to build (default cuda)
         required: false
       force:
         description: Rebuild even if the image tag already exists
@@ -33,19 +33,22 @@ jobs:
         with:
           path: overlay
 
-      - name: Resolve upstream tag
+      - name: Resolve upstream ref
         env:
-          WANT: ${{ inputs.tag }}
+          WANT: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          tag="${WANT:-$(git ls-remote --tags --refs "$UPSTREAM" 'v*' | awk '{sub("refs/tags/","",$2); print $2}' | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | sort -V | tail -1)}"
-          [ -n "$tag" ]
-          git clone --quiet --depth 1 --branch "$tag" "$UPSTREAM" src
+          # upstream's tensor-core CUDA kernels (Turing 3x faster than dp4a) live on its
+          # `cuda` branch, not on main or the vX.Y tags, so track that branch.
+          ref="${WANT:-cuda}"
+          git clone --quiet --depth 1 --branch "$ref" "$UPSTREAM" src
           sha="$(git -C src rev-parse HEAD)"
+          # commit time as the tag: a plain, orderable version for Renovate (YYYYMMDD.HHMM)
+          ver="$(TZ=UTC git -C src show -s --format=%cd --date=format-local:%Y%m%d.%H%M)"
           {
-            echo "UPSTREAM_TAG=$tag"
+            echo "UPSTREAM_TAG=$ref"
             echo "SOURCE_SHA=$sha"
-            echo "IMAGE_TAG=${tag#v}"
+            echo "IMAGE_TAG=$ver"
           } >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v4.4.1
@@ -82,6 +85,7 @@ jobs:
           set -euo pipefail
           # upstream v1.1 includes cp_version.h from 4 sources but never committed it;
           # this does nothing once a tag ships the file
+          grep -rqs 'cp_version.h' src/src || exit 0
           [ -f src/include/cp_version.h ] && exit 0
           ver="${UPSTREAM_TAG#v}"
           printf '#define CP_VERSION "%s"\n#define CP_AGENT_DEFAULT "CPPminer/%s"\n' "$ver" "$ver" > src/include/cp_version.h
