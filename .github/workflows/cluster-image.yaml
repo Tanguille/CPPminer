@@ -76,6 +76,16 @@ jobs:
           grep -q 'cp_fee_init(wallet_global, 0,' src/src/common/main.cpp
           cp overlay/Dockerfile src/Dockerfile
 
+      - name: Generate cp_version.h if upstream forgot to commit it
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # upstream v1.1 includes cp_version.h from 4 sources but never committed it;
+          # this does nothing once a tag ships the file
+          [ -f src/include/cp_version.h ] && exit 0
+          ver="${UPSTREAM_TAG#v}"
+          printf '#define CP_VERSION "%s"\n#define CP_AGENT_DEFAULT "CPPminer/%s"\n' "$ver" "$ver" > src/include/cp_version.h
+
       - id: build
         if: steps.exists.outputs.skip != 'true'
         uses: docker/build-push-action@v7.4.0
