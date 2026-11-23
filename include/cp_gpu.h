@@ -23,6 +23,7 @@ void cp_gpu_set_cutlass_fused(int on);
 /* CP_CUTLASS_MMA_AUTO / _SIMT / _TENSOROP (cp_cutlass.h); --cuda-mma. */
 void cp_gpu_set_cuda_mma(int mode);
 void cp_gpu_begin_job(const uint8_t job_key[32], int m, int n, uint32_t cert_version);
+int cp_gpu_proof_rows(int scan_rows);
 
 /* CPU matrix path: upload host noisy matrices and scan. */
 int cp_gpu_mine_plain_proof(const int8_t* h_A, const int8_t* h_B,
@@ -54,8 +55,8 @@ int cp_gpu_mine_attempt(
 /* Device → host signal A/B after a share (for deferred handoff). */
 int cp_gpu_fetch_share_signals(int8_t* h_A_sig, int8_t* h_Bt_sig);
 
-/* Zero-B share proof inputs: A sub-roots + the blocks covering the tile rows, cached zero-B
- * sub-roots. Allocates *out (cp_share_witness_free). Call before the next attempt. */
+/* A/B commitments and the signal blocks covering the winning tile. Zero-B blocks
+ * are implicit. Allocates *out (cp_share_witness_free); call before the next attempt. */
 int cp_gpu_fetch_share_witness(int t_rows, int t_cols, int tile_layout, CpShareWitness** out);
 
 #ifdef __cplusplus

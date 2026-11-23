@@ -169,10 +169,10 @@ __global__ void cp_apply_noise_b_rowmajor_kernel(
 
 /* Noisy rows written in the packed layout of the Turing scan kernel
  * (cp_turing_layout.cuh): blk = 256 for A (e = E_AL), 128 for B^T (e = E_BR).
- * signal may be NULL (zero-B). */
+ * A null signal represents a uniform matrix with value fill. */
 __global__ void cp_apply_noise_packed_kernel(
     const int8_t* signal, const int8_t* e, int8_t* noisy,
-    int rows, int k, int rank, const uint32_t* pairs, int blk)
+    int rows, int k, int rank, const uint32_t* pairs, int blk, int fill)
 {
     const int row = (int)blockIdx.x;
     if(row >= rows) return;
@@ -189,7 +189,7 @@ __global__ void cp_apply_noise_packed_kernel(
     __syncthreads();
 
     for(int l = (int)threadIdx.x; l < k; l += (int)blockDim.x){
-        const int32_t sig = signal ? (int32_t)signal[(size_t)row * (size_t)k + (size_t)l] : 0;
+        const int32_t sig = signal ? (int32_t)signal[(size_t)row * (size_t)k + (size_t)l] : fill;
         noisy[cp_turing_packed_offset(row, l, k, blk)] = (int8_t)(sig + (int32_t)sh_noise[l]);
     }
 }

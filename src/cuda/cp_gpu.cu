@@ -108,6 +108,10 @@ static int g_col_period_batch = CP_PERIOD_BATCH_DEFAULT;
 static int g_step_major_ap = 0; /* Case 10 default; main sets 1 for cuBLAS period */
 /* Noisy A/B^T in the packed layout of cp_turing_layout.cuh (Turing scan kernel). */
 static int g_packed_ab = 0;
+/* Opt-in per mining job. Only the public signal changes, not the scan kernel or target. */
+static bool g_const64 = false;
+static constexpr int kSignal64 = 64;
+int cp_gpu_proof_rows(int scan_rows) { return scan_rows + (g_const64 ? 1 : 0); }
 /* Cert V3: bind Merkle roots with m/n before noise-seed chain. Set by begin_job. */
 static int g_salted = 1;
 
@@ -150,14 +154,14 @@ static inline uint64_t gpu_host_splitmix64(uint64_t x)
     return x ^ (x >> 31);
 }
 
-/* Zero-B job cache: signal B^T = 0; noisy B fixed for the job. */
+/* Uniform signal B^T; its noise, commitment and witness sub-roots are cached per job. */
 static struct {
     uint8_t job_key[32];
     uint8_t b_noise_seed[32];
     int m;
     int n;
     int ready;
-    /* Keyed Merkle sub-roots + root of the all-zero B^T (host, n*K/256 KiB * 32 bytes). */
+    /* Keyed Merkle sub-roots + root of signal B^T (host, n*K/256 KiB * 32 bytes). */
     uint8_t* bt_subroots;
     int bt_num_subroots;
     uint8_t bt_root[32];
@@ -472,16 +476,23 @@ void cp_gpu_set_cuda_mma(int mode)
 
 void cp_gpu_begin_job(const uint8_t job_key[32], int m, int n, uint32_t cert_version)
 {
+    const char* opt = getenv("CP_CUDA_CONST64");
+    g_const64 = opt && !strcmp(opt, "1");
+    if(g_const64 && (!g_packed_ab || g_cpu_matrix_gen || !gpu_prep_rowpoke_enabled() ||
+                     cert_version != 3)){
+        fprintf(stderr, "[gpu] constant-64 requires packed CUDA, GPU row prep and cert v3\n");
+        exit(1);
+    }
     g_salted = (cert_version >= 3) ? 1 : 0;
     g_zero_b.ready = 0;
-    printf("[gpu] zero-B: cache noisy B per job (salted=%d cert_version=%u)\n", g_salted,
-           (unsigned)cert_version);
+    printf("[gpu] %s: cache noisy B per job (salted=%d cert_version=%u; scan_rows=%d proof_rows=%d)\n",
+           g_const64 ? "constant-64" : "zero-B", g_salted, (unsigned)cert_version, m, cp_gpu_proof_rows(m));
     fflush(stdout);
     if(g_ngpu <= 0 || !job_key || m <= 0 || n <= 0)
         return;
     GpuCtx* g0 = &g_gpus[0];
     if(gpu_prepare_job_b(g0, job_key, m, n) != 0){
-        fprintf(stderr, "[gpu] zero-B job B prep failed\n");
+        fprintf(stderr, "[gpu] job B prep failed\n");
         fflush(stderr);
     }
 }
@@ -624,6 +635,7 @@ void cp_gpu_shutdown(void)
     g_attempt_a.valid = 0;
     g_ngpu = 0;
     g_packed_ab = 0;
+    g_const64 = false;
     g_kernels_announced = 0;
 }
 
@@ -631,14 +643,15 @@ static void ensure_buffers(GpuCtx* g, int m, int n)
 {
     size_t szAp  = (size_t)m * K_DIM;
     size_t szBpT = (size_t)n * K_DIM;
-    size_t raw_a = szAp;
+    size_t raw_a = szAp + K_DIM; /* One extra signal row, never allocated in the scan buffers. */
     size_t raw_b = szBpT;
     size_t pad_a = (raw_a + 1023) / 1024 * 1024;
     size_t pad_b = (raw_b + 1023) / 1024 * 1024;
     size_t chunks_a = pad_a / 1024;
     size_t chunks_b = pad_b / 1024;
     size_t chunks_max = chunks_a > chunks_b ? chunks_a : chunks_b;
-    size_t merkle_need = ((chunks_max + CP_MT_THREADS - 1) / CP_MT_THREADS) * 32;
+    const size_t groups = (chunks_max + CP_MT_THREADS - 1) / CP_MT_THREADS;
+    size_t merkle_need = (groups + (groups + CP_MT_THREADS - 1) / CP_MT_THREADS) * 32;
     if(merkle_need < 32) merkle_need = 32;
 
     CU_CHECK(cudaSetDevice(g->dev));
@@ -647,7 +660,7 @@ static void ensure_buffers(GpuCtx* g, int m, int n)
          * Zero-B path skips d_Bt_sig (~512 MiB); allocate on demand for --cpu-gen / tests. */
         CU_CHECK(cudaMalloc(&g->d_Ap, szAp));
         CU_CHECK(cudaMalloc(&g->d_BpT, szBpT));
-        CU_CHECK(cudaMalloc(&g->d_A_sig, szAp));
+        CU_CHECK(cudaMalloc(&g->d_A_sig, raw_a));
         g->d_Bt_sig = nullptr;
         CU_CHECK(cudaMalloc(&g->d_e_ar, (size_t)K_DIM * 2 * sizeof(uint32_t)));
         CU_CHECK(cudaMalloc(&g->d_e_bl, (size_t)K_DIM * 2 * sizeof(uint32_t)));
@@ -752,7 +765,8 @@ static void gpu_noise_apply_a(GpuCtx* g, int m)
 
     if(g_packed_ab){
         cp_apply_noise_packed_kernel<<<m, tpb, smem>>>(
-            g->d_A_sig, g->d_eal, g->d_Ap, m, K_DIM, R_RANK, g->d_e_ar, CP_TURING_A_BLK);
+            g_const64 ? nullptr : g->d_A_sig, g->d_eal, g->d_Ap, m, K_DIM,
+            R_RANK, g->d_e_ar, CP_TURING_A_BLK, g_const64 ? kSignal64 : 0);
     } else if(g_step_major_ap){
         cp_apply_noise_a_kernel<<<m, tpb, smem>>>(
             g->d_A_sig, g->d_eal, g->d_Ap, m, K_DIM, R_RANK, g->d_e_ar);
@@ -771,7 +785,8 @@ static void gpu_noise_apply_b(GpuCtx* g, int n, const int8_t* d_bt_sig)
 
     if(g_packed_ab){
         cp_apply_noise_packed_kernel<<<n, tpb, smem>>>(
-            d_bt_sig, g->d_ebr, g->d_BpT, n, K_DIM, R_RANK, g->d_e_bl, CP_TURING_B_BLK);
+            d_bt_sig, g->d_ebr, g->d_BpT, n, K_DIM, R_RANK,
+            g->d_e_bl, CP_TURING_B_BLK, g_const64 ? kSignal64 : 0);
     } else if(g_step_major_ap){
         cp_apply_noise_b_kernel<<<n, tpb, smem>>>(
             d_bt_sig, g->d_ebr, g->d_BpT, n, K_DIM, R_RANK, g->d_e_bl);
@@ -1002,12 +1017,14 @@ static void cp_gpu_merkle_finish_root(
     int num_mt_blocks = (num_subroots + CP_MT_THREADS - 1) / CP_MT_THREADS;
     if(num_mt_blocks == 1){
         cp_compute_blake_mt_kernel<CP_MT_THREADS, true>
-            <<<1, CP_MT_THREADS, smem>>>(d_job_key, d_roots, num_subroots);
+            <<<1, CP_MT_THREADS, smem>>>(d_job_key, d_roots, num_subroots, d_roots);
     }else{
+        /* CTAs run in any order: the compact level must not alias unread inputs. */
+        uint8_t* compact = d_roots + (size_t)num_subroots * 32;
         cp_compute_blake_mt_kernel<CP_MT_THREADS, false>
-            <<<num_mt_blocks, CP_MT_THREADS, smem>>>(d_job_key, d_roots, num_subroots);
+            <<<num_mt_blocks, CP_MT_THREADS, smem>>>(d_job_key, d_roots, num_subroots, compact);
         cp_reduce_roots_kernel<CP_MT_THREADS>
-            <<<1, CP_MT_THREADS, smem>>>(d_job_key, d_roots, num_mt_blocks);
+            <<<1, CP_MT_THREADS, smem>>>(d_job_key, compact, num_mt_blocks, d_roots);
     }
     CU_CHECK(cudaGetLastError());
 }
@@ -1223,7 +1240,7 @@ static int gpu_prepare_noisy_matrices(
     return cp_job_should_cancel() ? -1 : 0;
 }
 
-/* Job-level zero-B: hash empty B^T, build noisy B into d_BpT (no d_Bt_sig). */
+/* Commit the uniform B^T before reusing the same device allocation for noisy B. */
 static int gpu_prepare_job_b(GpuCtx* g, const uint8_t job_key[32], int m, int n)
 {
     size_t szBpT = (size_t)n * K_DIM;
@@ -1232,38 +1249,34 @@ static int gpu_prepare_job_b(GpuCtx* g, const uint8_t job_key[32], int m, int n)
     CU_CHECK(cudaSetDevice(g->dev));
     ensure_buffers(g, m, n);
 
-    pearl_b_noise_seed_from_bt(job_key, NULL, n, K_DIM, g_salted, g_zero_b.b_noise_seed);
-    CU_CHECK(cudaMemcpy(g->d_seed_b, g_zero_b.b_noise_seed, 32, cudaMemcpyHostToDevice));
-
-    double t_step = cp_now_sec();
-    gpu_noise_generate_b(g, n);
-    CU_CHECK(cudaDeviceSynchronize());
-    printf("[gpu] zero-B noise gen (EBR/perm) %.3fs\n", cp_now_sec() - t_step);
-    fflush(stdout);
-
-    t_step = cp_now_sec();
-    gpu_noise_apply_b(g, n, /*d_bt_sig=*/NULL);
-    CU_CHECK(cudaDeviceSynchronize());
-    printf("[gpu] zero-B noise apply (B only) %.3fs\n", cp_now_sec() - t_step);
-    fflush(stdout);
-
     {
-        /* Zero B^T commitment for share proofs: sub-roots are a few KiB, no host matrix. */
+        /* Real signal bytes for constant-64; the default's zero signal is implicit. */
         size_t pad_b = (szBpT + 1023) / 1024 * 1024;
         size_t num_chunks_b = pad_b / 1024;
         size_t sub_bytes = ((num_chunks_b + CP_MT_THREADS - 1) / CP_MT_THREADS) * 32;
         uint8_t* sub = (uint8_t*)realloc(g_zero_b.bt_subroots, sub_bytes);
         if(!sub) return -1;
         g_zero_b.bt_subroots = sub;
-        t_step = cp_now_sec();
-        if(gpu_matrix_keyed_hash_ex(g, NULL, 0, pad_b, job_key, g_zero_b.bt_root,
+        const double t_step = cp_now_sec();
+        if(g_const64) CU_CHECK(cudaMemset(g->d_BpT, kSignal64, szBpT));
+        if(gpu_matrix_keyed_hash_ex(g, g_const64 ? g->d_BpT : nullptr,
+                                    g_const64 ? szBpT : 0, pad_b, job_key, g_zero_b.bt_root,
                                     sub, cudaMemcpyDeviceToHost,
                                     &g_zero_b.bt_num_subroots) != 0)
             return -1;
-        printf("[gpu] zero-B Merkle sub-roots (%d) %.3fs\n", g_zero_b.bt_num_subroots,
+        printf("[gpu] B Merkle sub-roots (%d) %.3fs\n", g_zero_b.bt_num_subroots,
                cp_now_sec() - t_step);
         fflush(stdout);
     }
+
+    if(g_const64)
+        pearl_b_noise_seed_from_root(job_key, g_zero_b.bt_root, n, g_salted, g_zero_b.b_noise_seed);
+    else
+        pearl_b_noise_seed_from_bt(job_key, nullptr, n, K_DIM, g_salted, g_zero_b.b_noise_seed);
+    CU_CHECK(cudaMemcpy(g->d_seed_b, g_zero_b.b_noise_seed, 32, cudaMemcpyHostToDevice));
+    gpu_noise_generate_b(g, n);
+    gpu_noise_apply_b(g, n, nullptr);
+    CU_CHECK(cudaDeviceSynchronize());
 
     for(int i = 1; i < g_ngpu; i++){
         GpuCtx* gi = &g_gpus[i];
@@ -1277,7 +1290,8 @@ static int gpu_prepare_job_b(GpuCtx* g, const uint8_t job_key[32], int m, int n)
     g_zero_b.m = m;
     g_zero_b.n = n;
     g_zero_b.ready = 1;
-    printf("[gpu] zero-B job B cached on device (%.3fs total)\n", cp_now_sec() - t0);
+    printf("[gpu] %s job B cached on device (%.3fs total)\n",
+           g_const64 ? "constant-64" : "zero-B", cp_now_sec() - t0);
     fflush(stdout);
     return cp_job_should_cancel() ? -1 : 0;
 }
@@ -1288,7 +1302,8 @@ static int gpu_prepare_job_b(GpuCtx* g, const uint8_t job_key[32], int m, int n)
 static int gpu_prepare_attempt_a(GpuCtx* g, uint64_t rng_seed, const uint8_t job_key[32],
                                  int m, int n)
 {
-    size_t szAp = (size_t)m * K_DIM;
+    const int proof_m = cp_gpu_proof_rows(m);
+    size_t szAp = (size_t)proof_m * K_DIM;
     size_t pad_a = (szAp + 1023) / 1024 * 1024;
     const int tpb = 256;
     int total_a = m * K_DIM;
@@ -1298,8 +1313,8 @@ static int gpu_prepare_attempt_a(GpuCtx* g, uint64_t rng_seed, const uint8_t job
     t_total = cp_now_sec();
     g_attempt_a.valid = 0;
 
-    /* Only one random row changes per nonce: the values the full generator gives that row for
-     * this nonce's seed. The rest keeps earlier nonces' rows, zero until written. */
+    /* Change one row per nonce. Constant-64 commits one extra random row beyond
+     * the scanned rows; the stock path changes a randomly selected scanned row. */
     const int incremental = gpu_prep_rowpoke_enabled() && m > 0 &&
                             (K_DIM % 1024) == 0 && pad_a == szAp && pad_a / 1024 > 1;
     uint32_t row = 0;
@@ -1310,12 +1325,13 @@ static int gpu_prepare_attempt_a(GpuCtx* g, uint64_t rng_seed, const uint8_t job
         g->a_sig_m = m;
         g->a_sub_valid = 0;
     } else {
-        if(g->a_sig_m != m){
-            CU_CHECK(cudaMemset(g->d_A_sig, 0, szAp));
-            g->a_sig_m = m;
+        if(g->a_sig_m != proof_m){
+            CU_CHECK(cudaMemset(g->d_A_sig, g_const64 ? kSignal64 : 0, szAp));
+            g->a_sig_m = proof_m;
             g->a_sub_valid = 0;
         }
-        row = (uint32_t)(gpu_host_splitmix64(rng_seed ^ 0xD1B54A32D192ED03ULL) % (uint64_t)m);
+        row = g_const64 ? (uint32_t)m :
+              (uint32_t)(gpu_host_splitmix64(rng_seed ^ 0xD1B54A32D192ED03ULL) % (uint64_t)m);
         cp_gen_random_range_kernel<<<(K_DIM + tpb - 1) / tpb, tpb>>>(
             rng_seed, 0, (int)row * K_DIM, K_DIM, g->d_A_sig);
     }
@@ -1383,7 +1399,7 @@ static int gpu_prepare_attempt_a(GpuCtx* g, uint64_t rng_seed, const uint8_t job
     }
     fflush(stdout);
 
-    if(gpu_derive_a_noise_seed(g, m) != 0) return -1;
+    if(gpu_derive_a_noise_seed(g, proof_m) != 0) return -1;
     g_attempt_a.valid = 1;
 
     t_step = cp_now_sec();
@@ -2802,6 +2818,7 @@ int cp_gpu_mine_attempt(
 
 int cp_gpu_fetch_share_signals(int8_t* h_A_sig, int8_t* h_Bt_sig)
 {
+    if(g_const64) return -1; /* The legacy host buffers contain scan_rows, not proof_rows. */
     if(g_ngpu <= 0 || !h_A_sig) return -1;
     GpuCtx* g0 = &g_gpus[0];
     if(!g0->d_A_sig) return -1;
@@ -2821,13 +2838,12 @@ int cp_gpu_fetch_share_signals(int8_t* h_A_sig, int8_t* h_Bt_sig)
 
 int cp_gpu_fetch_share_witness(int t_rows, int t_cols, int tile_layout, CpShareWitness** out)
 {
-    (void)t_cols;
     if(!out) return -1;
     *out = NULL;
     if(g_ngpu <= 0 || !g_attempt_a.valid || !g_zero_b.ready || !g_zero_b.bt_subroots)
         return -1;
     GpuCtx* g0 = &g_gpus[0];
-    const int m = g_m_active;
+    const int m = cp_gpu_proof_rows(g_m_active);
     if(m <= 0 || !g0->d_A_sig) return -1;
     const size_t szAp = (size_t)m * K_DIM;
 
@@ -2884,6 +2900,22 @@ int cp_gpu_fetch_share_witness(int t_rows, int t_cols, int tile_layout, CpShareW
     }
     memcpy(w->bt_root, g_zero_b.bt_root, 32);
 
+    if(g_const64){
+        const int n = g_zero_b.n;
+        int nb_b = cp_proof_witness_blocks(tile_layout, 1, t_cols, n, K_DIM,
+                                           w->bt_block_idx, CP_WITNESS_MAX_BLOCKS);
+        if(nb_b <= 0){ cp_share_witness_free(w); return -1; }
+        w->bt_num_blocks = (size_t)nb_b;
+        w->bt_blocks = (uint8_t*)calloc(w->bt_num_blocks, CP_WITNESS_BLOCK_BYTES);
+        if(!w->bt_blocks){ cp_share_witness_free(w); return -1; }
+        const size_t bytes = (size_t)n * K_DIM;
+        for(int i = 0; i < nb_b; ++i){
+            size_t off = (size_t)w->bt_block_idx[i] * CP_WITNESS_BLOCK_BYTES;
+            size_t len = off < bytes ? bytes - off : 0;
+            memset(w->bt_blocks + (size_t)i * CP_WITNESS_BLOCK_BYTES, kSignal64,
+                   len < CP_WITNESS_BLOCK_BYTES ? len : CP_WITNESS_BLOCK_BYTES);
+        }
+    }
     *out = w;
     return 0;
 }

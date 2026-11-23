@@ -1,0 +1,8 @@
+.git
+.github
+build
+**/target
+third_party/blake3
+third_party/cutlass
+cppminer
+*.exe

@@ -254,7 +254,7 @@ __global__ void cp_a_noise_seed_kernel(
 
 template<int kLeavesPerBlock, bool IsSingleBlock>
 __global__ void cp_compute_blake_mt_kernel(
-    const uint8_t job_key[32], uint8_t* roots, int num_leaves)
+    const uint8_t job_key[32], const uint8_t* roots, int num_leaves, uint8_t* out)
 {
     extern __shared__ uint32_t smem_leaves[];
     const int tid = threadIdx.x;
@@ -299,14 +299,14 @@ __global__ void cp_compute_blake_mt_kernel(
 
     if(tid < CP_MT_CV_WORDS){
         const size_t base = IsSingleBlock ? 0 : (size_t)bid * D_B3_OUT;
-        d_b3_store32(roots + base + (size_t)tid * 4,
+        d_b3_store32(out + base + (size_t)tid * 4,
                      d_mt_leaf_word(smem_leaves, tid, 0, kLeavesPerBlock));
     }
 }
 
 template<int kMaxThreads>
 __global__ void cp_reduce_roots_kernel(
-    const uint8_t job_key[32], uint8_t* roots, int num_leaves)
+    const uint8_t job_key[32], const uint8_t* roots, int num_leaves, uint8_t* out)
 {
     extern __shared__ uint32_t smem_leaves[];
     const int tid = threadIdx.x;
@@ -330,7 +330,7 @@ __global__ void cp_reduce_roots_kernel(
     __syncthreads();
 
     if(tid < CP_MT_CV_WORDS)
-        d_b3_store32(roots + (size_t)tid * 4,
+        d_b3_store32(out + (size_t)tid * 4,
                      d_mt_leaf_word(smem_leaves, tid, 0, kMaxThreads));
 }
 

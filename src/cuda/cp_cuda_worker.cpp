@@ -56,6 +56,11 @@ extern "C" int cp_cuda_worker_handles_matrix_prep(void)
     return 1;
 }
 
+extern "C" int cp_cuda_worker_proof_rows(int m)
+{
+    return cp_gpu_proof_rows(m);
+}
+
 extern "C" void cp_cuda_worker_begin_job(const uint8_t job_key[32], int m, int n,
                                          uint32_t cert_version)
 {
